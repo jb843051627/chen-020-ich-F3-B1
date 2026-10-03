@@ -41,9 +41,15 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         if (r == null) {
             return null;
         }
+        // 已收口的单子再点推进：同一条目不许反反复复处置——原样放回，一个数都不动
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
+            return r;
+        }
         int st = r.getStage() == null ? 0 : r.getStage();
-        r.setStage(Math.min(st + 2, MAX_STAGE));
-        r.setStatus(STATUS_ACTIVE);
+        int next = Math.min(st + 1, MAX_STAGE);
+        r.setStage(next);
+        // 状态跟着处置走：推进到末档（列入）即落"已收口"，其余落"在办"
+        r.setStatus(next >= MAX_STAGE ? STATUS_TERMINAL : STATUS_ACTIVE);
         r.setLastAction(remark);
         this.ichItemFlowMapper.updateById(r);
         return r;
@@ -55,8 +61,12 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         if (r == null) {
             return null;
         }
-        r.setStage(0);
-        r.setStatus(STATUS_ACTIVE);
+        // 与推进同一套规矩：只退一格，不一笔砸回头档
+        int st = r.getStage() == null ? 0 : r.getStage();
+        int prev = Math.max(st - 1, 0);
+        r.setStage(prev);
+        // 状态跟着处置走：退出收口后重回"在办"；从头未起的保留"未起"
+        r.setStatus(prev > 0 ? STATUS_ACTIVE : 0);
         r.setLastAction(remark);
         this.ichItemFlowMapper.updateById(r);
         return r;

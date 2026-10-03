@@ -39,14 +39,11 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
     @javax.annotation.Resource
     private TIchPreLineMapper ichPreLineMapper;
 
-    /**
-     * 时段比较统一走**墙钟字符串**（yyyy-MM-dd HH:mm:ss）+ 字符串绑定：
-     * JDBC 的 serverTimezone 与本机时区不对称，直接把 java.util.Date 作参数会整体偏移，
-     * 使边界判定在"切换当日"这类用例上随机错档（实测踩到）。
-     */
-    private static String ts(Date d) {
-        return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(d);
-    }
+    /** 分档口径的输入下界（含） */
+    private static final BigDecimal INPUT_MIN = BigDecimal.ZERO;
+
+    /** 分档口径的输入上界（含） */
+    private static final BigDecimal INPUT_MAX = new BigDecimal("100");
 
     @Override
     public TIchPreLine selectTIchPreLineById(Long id) {
@@ -58,7 +55,17 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
         if (at == null) {
             return new java.util.ArrayList<TIchPreLine>();
         }
-        return this.ichPreLineMapper.selectList(new QueryWrapper<TIchPreLine>().eq("del_flag", 0));
+        // 覆盖范围只此一处定：未删 + 在场 + 落在 [启用之日, 交棒之日) 内；
+        // 单规则求值 / 多规则求头 / 是否可用 / 计数四个通道全从这里过，不再各判各的
+        List<TIchPreLine> avail = new java.util.ArrayList<TIchPreLine>();
+        for (TIchPreLine r : this.ichPreLineMapper
+                .selectList(new QueryWrapper<TIchPreLine>().eq("del_flag", 0))) {
+            if (activeAt(r, at)) {
+                avail.add(r);
+            }
+        }
+        avail.sort(PRIORITY_THEN_CODE_DESC);
+        return avail;
     }
 
     @Override
@@ -66,8 +73,12 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
         if (ruleCode == null || ruleCode.trim().isEmpty() || input == null || at == null) {
             return 0;
         }
+        if (!withinInput(input)) {
+            return 0;
+        }
         TIchPreLine rule = findRule(ruleCode, at);
-        return levelOf(rule, input);
+        // 该时刻没有生效版本：按不可用回 0，不许拿 null 去解引用中断调用
+        return rule == null ? 0 : levelOf(rule, input);
     }
 
     @Override
@@ -75,8 +86,7 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
         if (input == null || at == null) {
             return 0;
         }
-        if (input.compareTo(BigDecimal.ZERO) < 0
-                || input.compareTo(new BigDecimal("100")) > 0) {
+        if (!withinInput(input)) {
             return 0;
         }
         List<TIchPreLine> avail = listAvailable(at);
@@ -92,7 +102,8 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
             return false;
         }
         TIchPreLine r = this.ichPreLineMapper.selectById(id);
-        return r != null;
+        // 与列表/定位同一个覆盖口径：存在且此刻在场生效才算可用
+        return r != null && activeAt(r, at);
     }
 
     @Override
@@ -100,22 +111,53 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
         if (at == null) {
             return 0;
         }
-        return this.ichPreLineMapper
-                .selectList(new QueryWrapper<TIchPreLine>().eq("del_flag", 0)).size();
+        return listAvailable(at).size();
+    }
+
+    /**
+     * 一条门槛线在 at 时刻是否在场生效——四个通道共用的唯一覆盖谓词。
+     * 未删、情形为在场（空值按在场）、已到启用之日（含）、未到交棒之日（不含）。
+     */
+    private boolean activeAt(TIchPreLine r, Date at) {
+        if (r == null) {
+            return false;
+        }
+        if (r.getDelFlag() != null && r.getDelFlag() != 0) {
+            return false;
+        }
+        if (r.getStatus() != null && r.getStatus() != 0) {
+            return false;
+        }
+        if (r.getEffStart() != null && at.before(r.getEffStart())) {
+            return false;
+        }
+        if (r.getEffEnd() != null && !at.before(r.getEffEnd())) {
+            return false;
+        }
+        return true;
+    }
+
+    /** 输入是否落在分档口径 [0,100]：单规则与多规则两处同一把尺 */
+    private boolean withinInput(BigDecimal input) {
+        return input.compareTo(INPUT_MIN) >= 0 && input.compareTo(INPUT_MAX) <= 0;
     }
 
     private TIchPreLine findRule(String ruleCode, Date at) {
-        List<TIchPreLine> hit = this.ichPreLineMapper.selectList(new QueryWrapper<TIchPreLine>()
-                .eq("del_flag", 0).eq("rule_code", ruleCode));
-        TIchPreLine newest = null;
-        for (TIchPreLine r : hit) {
-            if (newest == null || r.getEffEnd() == null) {
-                newest = r;
-            } else if (newest.getEffEnd() != null && r.getEffEnd().after(newest.getEffEnd())) {
-                newest = r;
+        TIchPreLine hit = null;
+        // 同一代号的在场生效版本里，交棒之日最晚（无交棒日视为仍有效、优先）者为准；
+        // 覆盖判定与 listAvailable 同源，停用的、过了交棒日的、没到启用日的都不取
+        for (TIchPreLine r : listAvailable(at)) {
+            if (ruleCode.equals(r.getRuleCode())) {
+                if (hit == null) {
+                    hit = r;
+                } else if (hit.getEffEnd() == null) {
+                    // 旧选已无交棒日，仍有效，保持
+                } else if (r.getEffEnd() == null || r.getEffEnd().after(hit.getEffEnd())) {
+                    hit = r;
+                }
             }
         }
-        return newest;
+        return hit;
     }
 
     /** 阈值解析：档案为主、明细覆盖；两者皆缺返回 null（调用方按不可用处理），精度统一 2 位 */

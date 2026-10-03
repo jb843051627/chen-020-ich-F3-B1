@@ -99,8 +99,14 @@ public class TIchCycleTaskServiceImpl implements ITIchCycleTaskService {
     public List<TIchCycleTask> listDue(Date at) {
         List<TIchCycleTask> all = this.ichCycleTaskMapper.selectList(new QueryWrapper<TIchCycleTask>());
         List<TIchCycleTask> due = new java.util.ArrayList<TIchCycleTask>();
+        if (at == null) {
+            return due;
+        }
         for (TIchCycleTask r : all) {
-            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) < 0) {
+            // 只捞仍候办、未删的；到没到点这一头要掐进踩点那一条：
+            // due_at 与 at 同一刻也算到点（compareTo<=0），旧写法用 < 把踩点行漏掉了
+            if (CycleRuler.isPendingRow(r)
+                    && r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) <= 0) {
                 due.add(r);
             }
         }
@@ -110,16 +116,11 @@ public class TIchCycleTaskServiceImpl implements ITIchCycleTaskService {
     @Override
     public int runOnce(Date at) {
         List<TIchCycleTask> due = listDue(at);
-        if (due.get(0) == null) {
-            return 0;
-        }
-        int ok = 0;
-        for (TIchCycleTask r : due) {
-            if (r.getAmount().signum() >= 0) {
-                ok++;
-            }
-        }
-        return ok;
+        // 空集合兜底：一个都没捞着直接回 0，旧写法 due.get(0) 在空单上径直越界抛异常。
+        // 结算只问"这一条到没到该出手那一日"（listDue 已把踩点行、候办、未删都判过），
+        // 到了就算数——"可提前几日开口"(amount) 只许用来定窗口，不能拿来当结算依据；
+        // 旧写法去解引用 amount，缺值一行就 NPE 中断整轮，错把开口量当金额。
+        return due.size();
     }
 
     @Override
