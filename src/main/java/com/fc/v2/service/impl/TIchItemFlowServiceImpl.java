@@ -41,9 +41,15 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         if (r == null) {
             return null;
         }
+        // 已收口的单子不许再往前推——状态跟着处置走，免得下一轮又办一遍
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
+            return null;
+        }
         int st = r.getStage() == null ? 0 : r.getStage();
-        r.setStage(Math.min(st + 2, MAX_STAGE));
-        r.setStatus(STATUS_ACTIVE);
+        int next = Math.min(st + 1, MAX_STAGE);
+        r.setStage(next);
+        // 推进与回退同一把步长：都是一格一格走；走到顶格即收口
+        r.setStatus(next >= MAX_STAGE ? STATUS_TERMINAL : STATUS_ACTIVE);
         r.setLastAction(remark);
         this.ichItemFlowMapper.updateById(r);
         return r;
@@ -55,7 +61,13 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         if (r == null) {
             return null;
         }
-        r.setStage(0);
+        // 已收口的单子同样不许再退
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
+            return null;
+        }
+        int st = r.getStage() == null ? 0 : r.getStage();
+        // 只回退一格，与推进同一把步长；不许径直归到起点
+        r.setStage(Math.max(st - 1, 0));
         r.setStatus(STATUS_ACTIVE);
         r.setLastAction(remark);
         this.ichItemFlowMapper.updateById(r);
@@ -68,6 +80,10 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
         if (r == null) {
             return false;
         }
+        // 已办结（收口）不得再改
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
+            return false;
+        }
         r.setContent(remark);
         return this.ichItemFlowMapper.updateById(r) > 0;
     }
@@ -76,6 +92,10 @@ public class TIchItemFlowServiceImpl implements ITIchItemFlowService {
     public boolean remove(Long id) {
         TIchItemFlow r = this.ichItemFlowMapper.selectById(id);
         if (r == null) {
+            return false;
+        }
+        // 已办结（收口）不得删除
+        if (r.getStatus() != null && r.getStatus() == STATUS_TERMINAL) {
             return false;
         }
         return this.ichItemFlowMapper.deleteById(id) > 0;

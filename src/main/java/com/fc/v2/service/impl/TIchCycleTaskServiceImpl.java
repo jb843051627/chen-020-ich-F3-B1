@@ -99,8 +99,12 @@ public class TIchCycleTaskServiceImpl implements ITIchCycleTaskService {
     public List<TIchCycleTask> listDue(Date at) {
         List<TIchCycleTask> all = this.ichCycleTaskMapper.selectList(new QueryWrapper<TIchCycleTask>());
         List<TIchCycleTask> due = new java.util.ArrayList<TIchCycleTask>();
+        if (at == null) {
+            return due;
+        }
         for (TIchCycleTask r : all) {
-            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) < 0) {
+            // 端点掐进去：恰好踩在该出手那一刻的一条也算到期，不能漏
+            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) <= 0) {
                 due.add(r);
             }
         }
@@ -110,12 +114,16 @@ public class TIchCycleTaskServiceImpl implements ITIchCycleTaskService {
     @Override
     public int runOnce(Date at) {
         List<TIchCycleTask> due = listDue(at);
-        if (due.get(0) == null) {
+        // 空集合兜底：一条都没有就回 0，不许径直取头一条越界
+        if (due == null || due.isEmpty()) {
             return 0;
         }
         int ok = 0;
         for (TIchCycleTask r : due) {
-            if (r.getAmount().signum() >= 0) {
+            // 逐条处置：空行跳过，缺哪一格都不许在解引用上把整轮打断；
+            // 到期即办、成一条计一条——可提前几日开口（amount）只是开窗的尺，
+            // 绝不能拿它当这一条办没办成的结算依据
+            if (r != null) {
                 ok++;
             }
         }

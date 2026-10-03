@@ -21,7 +21,7 @@ import com.fc.v2.service.ITIchPreLineService;
 @Service
 public class TIchPreLineServiceImpl implements ITIchPreLineService {
 
-    /** 优先级降序；并列按 ruleCode 降序（确定性） */
+    /** 优先级降序；并列按 ruleCode 降序，再并列按启用之日降序（确定性） */
     private static final Comparator<TIchPreLine> PRIORITY_THEN_CODE_DESC = new Comparator<TIchPreLine>() {
         @Override
         public int compare(TIchPreLine a, TIchPreLine b) {
@@ -32,7 +32,22 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
             }
             String ca = a.getRuleCode() == null ? "" : a.getRuleCode();
             String cb = b.getRuleCode() == null ? "" : b.getRuleCode();
-            return cb.compareTo(ca);
+            int byCode = cb.compareTo(ca);
+            if (byCode != 0) {
+                return byCode;
+            }
+            Date sa = a.getEffStart();
+            Date sb = b.getEffStart();
+            if (sa == null && sb == null) {
+                return 0;
+            }
+            if (sa == null) {
+                return 1;
+            }
+            if (sb == null) {
+                return -1;
+            }
+            return sb.compareTo(sa);
         }
     };
 
@@ -55,10 +70,22 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
 
     @Override
     public List<TIchPreLine> listAvailable(Date at) {
+        List<TIchPreLine> empty = new java.util.ArrayList<TIchPreLine>();
         if (at == null) {
-            return new java.util.ArrayList<TIchPreLine>();
+            return empty;
         }
-        return this.ichPreLineMapper.selectList(new QueryWrapper<TIchPreLine>().eq("del_flag", 0));
+        // 查单只问一条：这一刻在不在场（未删、未停用、已启用未交棒），
+        // 再按让位顺位排开——查单、求值、单条可用、计数全从这一份过，尺度同源
+        List<TIchPreLine> all = this.ichPreLineMapper.selectList(
+                new QueryWrapper<TIchPreLine>().eq("del_flag", 0));
+        List<TIchPreLine> avail = new java.util.ArrayList<TIchPreLine>();
+        for (TIchPreLine r : all) {
+            if (availableAt(r, at)) {
+                avail.add(r);
+            }
+        }
+        avail.sort(PRIORITY_THEN_CODE_DESC);
+        return avail;
     }
 
     @Override
@@ -67,6 +94,10 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
             return 0;
         }
         TIchPreLine rule = findRule(ruleCode, at);
+        // 这一刻没有在场版本：按不可用回 0，不许在空规则上解引用
+        if (rule == null) {
+            return 0;
+        }
         return levelOf(rule, input);
     }
 
@@ -79,6 +110,7 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
                 || input.compareTo(new BigDecimal("100")) > 0) {
             return 0;
         }
+        // 多规则求值取让位顺位最靠前的一条，与列表同一把尺
         List<TIchPreLine> avail = listAvailable(at);
         if (avail.isEmpty()) {
             return 0;
@@ -92,7 +124,8 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
             return false;
         }
         TIchPreLine r = this.ichPreLineMapper.selectById(id);
-        return r != null;
+        // 与定位/列表同一份"这一刻在不在场"判定，不许另起一套口径
+        return availableAt(r, at);
     }
 
     @Override
@@ -100,22 +133,48 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
         if (at == null) {
             return 0;
         }
-        return this.ichPreLineMapper
-                .selectList(new QueryWrapper<TIchPreLine>().eq("del_flag", 0)).size();
+        return listAvailable(at).size();
+    }
+
+    /**
+     * 这条线这一刻在不在场：未删除、未停用、已到启用之日、未到交棒之日（交棒那日不含）。
+     * 启用之日空着视为自古在场，交棒之日空着视为一直在场。
+     */
+    private static boolean availableAt(TIchPreLine r, Date at) {
+        if (r == null || at == null) {
+            return false;
+        }
+        if (r.getDelFlag() != null && r.getDelFlag() != 0) {
+            return false;
+        }
+        if (r.getStatus() != null && r.getStatus() != 0) {
+            return false;
+        }
+        if (r.getEffStart() != null && at.before(r.getEffStart())) {
+            return false;
+        }
+        if (r.getEffEnd() != null && !at.before(r.getEffEnd())) {
+            return false;
+        }
+        return true;
     }
 
     private TIchPreLine findRule(String ruleCode, Date at) {
+        // 同一代号多个版本：只在这一刻在场的版本里挑，让位顺位最靠前（并列取启用之日最新）的一条
         List<TIchPreLine> hit = this.ichPreLineMapper.selectList(new QueryWrapper<TIchPreLine>()
                 .eq("del_flag", 0).eq("rule_code", ruleCode));
-        TIchPreLine newest = null;
+        List<TIchPreLine> avail = new java.util.ArrayList<TIchPreLine>();
         for (TIchPreLine r : hit) {
-            if (newest == null || r.getEffEnd() == null) {
-                newest = r;
-            } else if (newest.getEffEnd() != null && r.getEffEnd().after(newest.getEffEnd())) {
-                newest = r;
+            // 内存里再对一遍代号与在场时刻，口径与 SQL 过滤同源，旁路取数也混不进别条线
+            if (ruleCode.equals(r.getRuleCode()) && availableAt(r, at)) {
+                avail.add(r);
             }
         }
-        return newest;
+        if (avail.isEmpty()) {
+            return null;
+        }
+        avail.sort(PRIORITY_THEN_CODE_DESC);
+        return avail.get(0);
     }
 
     /** 阈值解析：档案为主、明细覆盖；两者皆缺返回 null（调用方按不可用处理），精度统一 2 位 */
@@ -134,15 +193,15 @@ public class TIchPreLineServiceImpl implements ITIchPreLineService {
         return r.getTh1Max();
     }
 
-    /** 分档：等于上限取高一档 */
+    /** 分档：等于上限取高一档（踩在线上的归入高一线那一档） */
     private int levelOf(TIchPreLine rule, BigDecimal input) {
-        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) <= 0) {
+        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) < 0) {
             return 1;
         }
-        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) <= 0) {
+        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) < 0) {
             return 2;
         }
-        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) <= 0) {
+        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) < 0) {
             return 3;
         }
         return 4;
